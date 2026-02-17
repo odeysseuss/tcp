@@ -11,13 +11,18 @@ void readAndWrite(Conn *conn) {
 
     while (1) {
         ssize_t bytes_recv = recv(conn->fd, &buf, 1024, 0);
-        if (bytes_recv <= 0) {
-            break;
+        printf("recv\n");
+        if (bytes_recv == -1) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                break;
+            }
+            return;
         }
 
-        int fd = sendall(conn->fd, buf, bytes_recv);
-        if (fd == -1) {
-            break;
+        ssize_t bytes_send = sendAll(conn->fd, &buf, bytes_recv);
+        printf("send\n");
+        if (bytes_send == -1) {
+            return;
         }
     }
 }
@@ -38,7 +43,7 @@ int main(void) {
     while (1) {
         Conn *conn = tcpAccept(listener);
         if (!conn) {
-            return -1;
+            continue;
         }
 
         fprintf(stdout,
@@ -46,8 +51,9 @@ int main(void) {
                 inet_ntop(AF_INET, &conn->addr.sin_addr, str, INET_ADDRSTRLEN),
                 ntohs(conn->addr.sin_port));
 
-        tcpHandler(conn, readAndWrite);
-        tcpConnClose(conn);
+        if (tcpHandler(listener, conn, readAndWrite) == -1) {
+            return -1;
+        }
     }
     tcpListenerClose(listener);
 

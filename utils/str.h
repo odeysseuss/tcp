@@ -13,6 +13,12 @@
 extern "C" {
 #endif
 
+/// for custom allocators
+#define malloc_ malloc
+#define calloc_ calloc
+#define realloc_ realloc
+#define free_ free
+
 typedef char *String;
 
 /// constructors and destructors
@@ -49,7 +55,7 @@ static inline uint32_t getStrAlloc_(const String s) {
 }
 
 String strNewLen(const void *s, const uint32_t len) {
-    StrHdr_ *hdr = (StrHdr_ *)malloc(sizeof(StrHdr_) + len + 1);
+    StrHdr_ *hdr = (StrHdr_ *)malloc_(sizeof(StrHdr_) + len + 1);
     if (!hdr) {
         return NULL;
     }

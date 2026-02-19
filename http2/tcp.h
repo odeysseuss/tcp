@@ -2,10 +2,13 @@
 #define TCP_H
 
 #include <errno.h>
+#include <errno.h>
 #include <netinet/in.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/socket.h>
+#include <time.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/epoll.h>
@@ -23,17 +26,21 @@ extern "C" {
 #define MAX_EPOLL_EVENTS 64
 
 typedef struct {
+    int epoll_fd;
+} Event;
+
+typedef struct {
     struct epoll_event ev, events[MAX_EPOLL_EVENTS];
-    struct sockaddr_in addr;
-    socklen_t size;
     int epoll_fd;
     int fd;
+    uint32_t addr;
+    uint16_t port;
 } Listener;
 
 typedef struct {
-    struct sockaddr_in addr;
-    socklen_t size;
     int fd;
+    uint32_t addr;
+    uint16_t port;
 } Conn;
 
 Listener *tcpListen(int port);
@@ -45,7 +52,7 @@ void tcpCloseConn(Conn *conn);
 
 ssize_t sendAll(int fd, const void *buf, size_t len);
 
-#ifdef TCP_IMPLEMENTATION
+// #ifdef TCP_IMPLEMENTATION
 
 static int setNonBlockingSocket_(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);
@@ -92,13 +99,16 @@ Listener *tcpListen(int port) {
         goto clean;
     }
 
-    listener->fd = fd;
-    listener->size = sizeof(listener->addr);
-    listener->addr.sin_family = AF_INET;
-    listener->addr.sin_port = htons(port);
-    listener->addr.sin_addr.s_addr = INADDR_ANY;
+    struct sockaddr_in addr;
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    addr.sin_addr.s_addr = INADDR_ANY;
 
-    if (bind(fd, (struct sockaddr *)&listener->addr, listener->size) == -1) {
+    listener->fd = fd;
+    listener->port = addr.sin_port;
+    listener->addr = addr.sin_addr.s_addr;
+
+    if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) == -1) {
         perror("bind");
         goto clean;
     }
@@ -138,7 +148,8 @@ static int addtoEpollList_(Conn *conn, Listener *listener) {
 
     listener->ev.data.ptr = conn;
     listener->ev.events = EPOLLIN | EPOLLRDHUP | EPOLLET;
-    if (epoll_ctl(listener->epoll_fd, EPOLL_CTL_ADD, conn->fd, &listener->ev) == -1) {
+    if (epoll_ctl(listener->epoll_fd, EPOLL_CTL_ADD, conn->fd, &listener->ev) ==
+        -1) {
         perror("epoll_ctl add client");
         return -1;
     }
@@ -157,20 +168,22 @@ Conn *tcpAccept(Listener *listener) {
         return NULL;
     }
 
-    conn->size = sizeof(struct sockaddr_in);
-    int conn_fd =
-        accept(listener->fd, (struct sockaddr *)&conn->addr, &conn->size);
+    struct sockaddr_in addr;
+    socklen_t size = sizeof(addr);
+    int conn_fd = accept(listener->fd, (struct sockaddr *)&addr, &size);
 
     if (conn_fd == -1) {
-        free_(conn);
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
             return NULL;
         }
         perror("accept");
+        free_(conn);
         return NULL;
     }
 
     conn->fd = conn_fd;
+    conn->addr = addr.sin_addr.s_addr;
+    conn->port = addr.sin_port;
 
     if (setNonBlockingSocket_(conn_fd) == -1) {
         goto clean;
@@ -255,7 +268,7 @@ ssize_t sendAll(int fd, const void *buf, size_t len) {
     return total;
 }
 
-#endif
+// #endif
 
 #ifdef __cplusplus
 }

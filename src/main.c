@@ -27,12 +27,11 @@ void readAndWrite(Conn *conn) {
         }
 
         if (bytes_recv == 0) {
-            fprintf(
-                stdout,
-                "[Disconnected] %s:%d (fd: %d)\n",
-                inet_ntop(AF_INET, &conn->addr.sin_addr, str, INET_ADDRSTRLEN),
-                ntohs(conn->addr.sin_port),
-                conn->fd);
+            fprintf(stdout,
+                    "[Disconnected] %s:%d (fd: %d)\n",
+                    inet_ntop(AF_INET, &conn->addr, str, INET_ADDRSTRLEN),
+                    ntohs(conn->port),
+                    conn->fd);
             goto clean;
         }
 
@@ -60,8 +59,8 @@ int main(void) {
 
     fprintf(stdout,
             "[Listening] %s:%d\n",
-            inet_ntop(AF_INET, &listener->addr.sin_addr, str, INET_ADDRSTRLEN),
-            ntohs(listener->addr.sin_port));
+            inet_ntop(AF_INET, &listener->addr, str, INET_ADDRSTRLEN),
+            ntohs(listener->port));
 
     while (1) {
         int nfds = tcpPoll(listener);
@@ -81,14 +80,12 @@ int main(void) {
                         break;
                     }
 
-                    fprintf(stdout,
-                            "[Connected] %s:%d (fd: %d)\n",
-                            inet_ntop(AF_INET,
-                                      &conn->addr.sin_addr,
-                                      str,
-                                      INET_ADDRSTRLEN),
-                            ntohs(conn->addr.sin_port),
-                            conn->fd);
+                    fprintf(
+                        stdout,
+                        "[Connected] %s:%d (fd: %d)\n",
+                        inet_ntop(AF_INET, &conn->addr, str, INET_ADDRSTRLEN),
+                        ntohs(conn->port),
+                        conn->fd);
                 }
             } else {
                 Conn *conn = (Conn *)listener->events[i].data.ptr;

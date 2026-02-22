@@ -32,10 +32,11 @@ void readAndWrite(Conn *conn) {
                     inet_ntop(AF_INET, &conn->addr, str, INET_ADDRSTRLEN),
                     ntohs(conn->port),
                     conn->fd);
+
             goto clean;
         }
 
-        ssize_t bytes_send = sendAll(conn->fd, buf, bytes_recv);
+        ssize_t bytes_send = tcpSendAll(conn->fd, buf, bytes_recv);
         if (bytes_send == -1) {
             perror("sendAll");
             goto clean;
@@ -63,17 +64,18 @@ int main(void) {
             ntohs(listener->port));
 
     while (1) {
-        int nfds = tcpPoll(listener);
-        if (nfds == -1) {
+        Event *event = tcpPoll(listener);
+        if (!event) {
             break;
         }
 
+        int nfds = event->nfds;
         for (int i = 0; i < nfds; i++) {
-            if (listener->events[i].events & (EPOLLERR | EPOLLHUP)) {
+            if (event->events[i].events & (EPOLLERR | EPOLLHUP)) {
                 continue;
             }
 
-            if (listener->events[i].data.fd == listener->fd) {
+            if (event->events[i].data.fd == listener->fd) {
                 while (1) {
                     Conn *conn = tcpAccept(listener);
                     if (!conn) {
@@ -88,7 +90,7 @@ int main(void) {
                         conn->fd);
                 }
             } else {
-                Conn *conn = (Conn *)listener->events[i].data.ptr;
+                Conn *conn = event->events[i].data.ptr;
                 if (tcpHandler(conn, readAndWrite) == -1) {
                     fprintf(stderr, "Error in tcpHandler\n");
                 }
@@ -97,5 +99,6 @@ int main(void) {
     }
 
     tcpCloseListener(listener);
+
     return 0;
 }

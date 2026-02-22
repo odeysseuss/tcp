@@ -1,14 +1,13 @@
 #ifndef TCP_H
 #define TCP_H
 
-#include <errno.h>
+#include <arpa/inet.h>
 #include <errno.h>
 #include <netinet/in.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/socket.h>
-#include <time.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/epoll.h>
@@ -26,12 +25,12 @@ extern "C" {
 #define MAX_EPOLL_EVENTS 64
 
 typedef struct {
+    struct epoll_event ev, events[MAX_EPOLL_EVENTS];
     int epoll_fd;
+    int nfds;
 } Event;
 
 typedef struct {
-    struct epoll_event ev, events[MAX_EPOLL_EVENTS];
-    int epoll_fd;
     int fd;
     uint32_t addr;
     uint16_t port;
@@ -44,15 +43,30 @@ typedef struct {
 } Conn;
 
 Listener *tcpListen(int port);
+Event *tcpPoll(Listener *listener);
 Conn *tcpAccept(Listener *listener);
 int tcpHandler(Conn *conn, void (*handler)(Conn *conn));
-int tcpPoll(Listener *listener);
-void tcpCloseListener(Listener *listener);
 void tcpCloseConn(Conn *conn);
+void tcpCloseListener(Listener *listener);
 
-ssize_t sendAll(int fd, const void *buf, size_t len);
+ssize_t tcpSendAll(int fd, const void *buf, size_t len);
 
-// #ifdef TCP_IMPLEMENTATION
+#ifdef TCP_IMPLEMENTATION
+
+static int setSockOpt_(int fd) {
+    int opt = 1;
+    if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) == -1) {
+        perror("setsockopt");
+        return -1;
+    }
+
+    if (setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt)) == -1) {
+        perror("setsockopt");
+        return -1;
+    }
+
+    return 0;
+}
 
 static int setNonBlockingSocket_(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);
@@ -70,8 +84,48 @@ static int setNonBlockingSocket_(int fd) {
     return 0;
 }
 
+static Event *getEventPtr_(Listener *listener) {
+    return (Event *)(listener + 1);
+}
+
+static int tcpEpollInit_(Listener *listener) {
+    int epoll_fd = epoll_create1(0);
+    if (epoll_fd == -1) {
+        perror("epoll_create1");
+        return -1;
+    }
+
+    Event *event = getEventPtr_(listener);
+    event->epoll_fd = epoll_fd;
+    event->ev.data.fd = listener->fd;
+    event->ev.events = EPOLLIN | EPOLLET;
+    if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, listener->fd, &event->ev) == -1) {
+        perror("epoll ctl listener");
+        close(epoll_fd);
+        return -1;
+    }
+
+    return 0;
+}
+
+static int addtoEpollList_(Conn *conn, Listener *listener) {
+    if (!listener || !conn) {
+        return -1;
+    }
+
+    Event *event = getEventPtr_(listener);
+    event->ev.data.ptr = conn;
+    event->ev.events = EPOLLIN | EPOLLRDHUP | EPOLLET;
+    if (epoll_ctl(event->epoll_fd, EPOLL_CTL_ADD, conn->fd, &event->ev) == -1) {
+        perror("epoll_ctl add client");
+        return -1;
+    }
+
+    return 0;
+}
+
 Listener *tcpListen(int port) {
-    Listener *listener = malloc_(sizeof(Listener));
+    Listener *listener = malloc_(sizeof(Listener) + sizeof(Event));
     if (!listener) {
         perror("malloc");
         return NULL;
@@ -84,14 +138,7 @@ Listener *tcpListen(int port) {
         return NULL;
     }
 
-    int opt = 1;
-    if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) == -1) {
-        perror("setsockopt");
-        goto clean;
-    }
-
-    if (setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt)) == -1) {
-        perror("setsockopt");
+    if (setSockOpt_(fd) == -1) {
         goto clean;
     }
 
@@ -118,18 +165,7 @@ Listener *tcpListen(int port) {
         goto clean;
     }
 
-    int epoll_fd = epoll_create1(0);
-    if (epoll_fd == -1) {
-        perror("epoll_create1");
-        goto clean;
-    }
-
-    listener->epoll_fd = epoll_fd;
-    listener->ev.data.fd = fd;
-    listener->ev.events = EPOLLIN | EPOLLET;
-    if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fd, &listener->ev) == -1) {
-        perror("epoll ctl listener");
-        close(epoll_fd);
+    if (tcpEpollInit_(listener) == -1) {
         goto clean;
     }
 
@@ -141,20 +177,17 @@ clean:
     return NULL;
 }
 
-static int addtoEpollList_(Conn *conn, Listener *listener) {
-    if (!listener || !conn) {
-        return -1;
+Event *tcpPoll(Listener *listener) {
+    Event *event = getEventPtr_(listener);
+    event->nfds =
+        epoll_wait(event->epoll_fd, event->events, MAX_EPOLL_EVENTS, -1);
+    if (event->nfds == -1) {
+        perror("epoll_wait");
+        tcpCloseListener(listener);
+        return NULL;
     }
 
-    listener->ev.data.ptr = conn;
-    listener->ev.events = EPOLLIN | EPOLLRDHUP | EPOLLET;
-    if (epoll_ctl(listener->epoll_fd, EPOLL_CTL_ADD, conn->fd, &listener->ev) ==
-        -1) {
-        perror("epoll_ctl add client");
-        return -1;
-    }
-
-    return 0;
+    return event;
 }
 
 Conn *tcpAccept(Listener *listener) {
@@ -210,17 +243,6 @@ int tcpHandler(Conn *conn, void (*handler)(Conn *conn)) {
     return 0;
 }
 
-int tcpPoll(Listener *listener) {
-    int nfds =
-        epoll_wait(listener->epoll_fd, listener->events, MAX_EPOLL_EVENTS, -1);
-    if (nfds == -1) {
-        perror("epoll_wait");
-        return -1;
-    }
-
-    return nfds;
-}
-
 void tcpCloseConn(Conn *conn) {
     if (!conn) {
         return;
@@ -235,13 +257,14 @@ void tcpCloseListener(Listener *listener) {
         return;
     }
 
-    close(listener->epoll_fd);
+    Event *event = getEventPtr_(listener);
+    close(event->epoll_fd);
     close(listener->fd);
     free_(listener);
 }
 
-ssize_t sendAll(int fd, const void *buf, size_t len) {
-    if (fd < 0 || !buf) {
+ssize_t tcpSendAll(int fd, const void *buf, size_t len) {
+    if (fd < 0 || !buf || len < 0) {
         return -1;
     }
 
@@ -259,7 +282,7 @@ ssize_t sendAll(int fd, const void *buf, size_t len) {
             return -1;
         }
         if (bytes_send == 0) {
-            break; // Connection closed
+            break;
         }
         total += bytes_send;
         bytes_left -= bytes_send;
@@ -268,7 +291,7 @@ ssize_t sendAll(int fd, const void *buf, size_t len) {
     return total;
 }
 
-// #endif
+#endif
 
 #ifdef __cplusplus
 }

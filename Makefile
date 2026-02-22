@@ -1,6 +1,6 @@
 cc := clang
 cflags := -std=c11 -Wall -Wextra -pedantic -MMD -MP -D_GNU_SOURCE
-incdir := -Ihttp2 -Iutils
+incdir := -Itcp -Iutils
 objdir := build/obj
 
 MODE ?= debug
@@ -13,7 +13,7 @@ endif
 srcs := $(wildcard src/*.c)
 objs := $(srcs:src/%.c=$(objdir)/%.o)
 deps := $(srcs:src/%.c=$(objdir)/%.d)
-exec := build/http2
+exec := build/tcp
 -include $(deps)
 
 .PHONY: all test run clean

@@ -18,7 +18,10 @@
 extern "C" {
 #endif
 
-/// for custom allocators
+/// Used for custom general purpose allocators
+/// To use a custom allocators simply define them to the specific allocator's functions
+/// Warning: The function signatures has to be the same as stdlib's allocator
+/// Recommended Allocator: Microsoft's mimalloc
 #define malloc_ malloc
 #define calloc_ calloc
 #define realloc_ realloc

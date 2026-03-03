@@ -7,11 +7,13 @@
 *   #define TCP_IMPLEMENTATION
 *   #include "tcp.h"
 *
+* DEPENDENCIES: memory/pool.h
 * WARNING: Only accessible in Linux
 */
 #ifndef TCP_H
 #define TCP_H
 
+#define POOL_IMPLEMENTATION
 #include <arpa/inet.h>
 #include <errno.h>
 #include <netinet/in.h>
@@ -26,6 +28,7 @@
 #include <wait.h>
 #include <signal.h>
 #include <netdb.h>
+#include "pool.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -46,6 +49,7 @@ extern "C" {
 /// The maximum length to which the queue of pending connections for server `Listener.fd`
 /// may grow.
 #define BACKLOG SOMAXCONN
+#define INITIAL_POOL_SIZE 1024
 
 /// The lifetime of `Event` is managed by `Listener`
 typedef struct {
@@ -58,6 +62,7 @@ typedef struct {
     int fd;
     socklen_t addr_len;
     struct sockaddr_storage addr;
+    PoolAlloc *pool;
 } Listener;
 
 typedef struct {
@@ -65,6 +70,7 @@ typedef struct {
     int epoll_fd;
     socklen_t addr_len;
     struct sockaddr_storage addr;
+    PoolAlloc *pool;
 } Conn;
 
 /// Initiates the server instance and adds the server socket for polling
@@ -77,7 +83,7 @@ Listener *tcpListen(char *port);
 /// Poll the sockets for IO multiplexing.
 /// Info:
 /// After the function returns, use the `nfds` field to loop through the available events
-/// and check for the specific event's `data.fd`. If fd is `listener.fd` then event occured 
+/// and check for the specific event's `data.fd`. If fd is `listener.fd` then event occured
 /// in server. For server event, run `tcpAccept` and for each client run `tcpHandler`.
 /// `tcpHandler` can get the Conn pointer from `data.ptr`.
 /// Warning:
@@ -299,6 +305,8 @@ Listener *tcpListen(char *port) {
         goto clean;
     }
 
+    listener->pool = poolInit(sizeof(Conn), INITIAL_POOL_SIZE);
+
     return listener;
 
 clean:
@@ -325,16 +333,6 @@ Conn *tcpAccept(Listener *listener) {
         return NULL;
     }
 
-    // FIX:
-    // Not so performant as every time a new client connects it allocates memory
-    // in the heap. So, if there are 100 clients it calls malloc a 100 times
-    /// TODO: Use a connection pool
-    Conn *conn = (Conn *)malloc_(sizeof(Conn));
-    if (!conn) {
-        perror("malloc conn");
-        return NULL;
-    }
-
     struct sockaddr_storage addr;
     socklen_t size = sizeof(addr);
     int conn_fd = accept(listener->fd, (struct sockaddr *)&addr, &size);
@@ -344,11 +342,12 @@ Conn *tcpAccept(Listener *listener) {
             return NULL;
         }
         perror("accept");
-        free_(conn);
         return NULL;
     }
 
     Event *event = getEventPtr_(listener);
+    Conn *conn = poolAlloc(listener->pool);
+    conn->pool = listener->pool;
     conn->fd = conn_fd;
     conn->epoll_fd = event->epoll_fd;
     conn->addr = addr;
@@ -366,7 +365,7 @@ Conn *tcpAccept(Listener *listener) {
 
 clean:
     close(conn_fd);
-    free_(conn);
+    poolFree(listener->pool, conn);
     return NULL;
 }
 
@@ -388,7 +387,7 @@ void tcpCloseConn(Conn *conn) {
         perror("epoll_ctl del");
     }
     close(conn->fd);
-    free_(conn);
+    poolFree(conn->pool, conn);
 }
 
 void tcpCloseListener(Listener *listener) {
@@ -399,6 +398,7 @@ void tcpCloseListener(Listener *listener) {
     Event *event = getEventPtr_(listener);
     close(event->epoll_fd);
     close(listener->fd);
+    poolDestroy(listener->pool);
     free_(listener);
 }
 

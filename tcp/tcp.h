@@ -7,7 +7,7 @@
 *   #define TCP_IMPLEMENTATION
 *   #include "tcp.h"
 *
-* DEPENDENCIES: memory/pool.h
+* DEPENDENCIES: mem/pool.h
 * WARNING: Only accessible in Linux
 */
 #ifndef TCP_H
@@ -49,28 +49,26 @@ extern "C" {
 /// The maximum length to which the queue of pending connections for server `Listener.fd`
 /// may grow.
 #define BACKLOG SOMAXCONN
+/// Intial number of chunks in the pool
 #define INITIAL_POOL_SIZE 1024
 
 /// The lifetime of `Event` is managed by `Listener`
 typedef struct {
-    struct epoll_event ev, events[MAX_EPOLL_EVENTS];
-    int epoll_fd;
+    struct epoll_event ev_, events[MAX_EPOLL_EVENTS];
+    int fd_;
     int nfds;
 } Event;
 
 typedef struct {
-    int fd;
-    socklen_t addr_len;
     struct sockaddr_storage addr;
-    PoolAlloc *pool;
+    PoolAlloc *pool_;
+    int fd;
 } Listener;
 
 typedef struct {
-    int fd;
-    int epoll_fd;
-    socklen_t addr_len;
     struct sockaddr_storage addr;
-    PoolAlloc *pool;
+    Listener *listener_;
+    int fd;
 } Conn;
 
 /// Initiates the server instance and adds the server socket for polling
@@ -204,10 +202,10 @@ static int tcpEpollInit_(Listener *listener) {
     }
 
     Event *event = getEventPtr_(listener);
-    event->epoll_fd = epoll_fd;
-    event->ev.data.fd = listener->fd;
-    event->ev.events = EPOLLIN | EPOLLET;
-    if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, listener->fd, &event->ev) == -1) {
+    event->fd_ = epoll_fd;
+    event->ev_.data.fd = listener->fd;
+    event->ev_.events = EPOLLIN | EPOLLET;
+    if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, listener->fd, &event->ev_) == -1) {
         perror("epoll_ctl listener");
         close(epoll_fd);
         return -1;
@@ -216,15 +214,15 @@ static int tcpEpollInit_(Listener *listener) {
     return 0;
 }
 
-static int addtoEpollList_(Conn *conn, Listener *listener) {
+static int addtoEpollList_(Listener *listener, Conn *conn) {
     if (!listener || !conn) {
         return -1;
     }
 
     Event *event = getEventPtr_(listener);
-    event->ev.data.ptr = conn;
-    event->ev.events = EPOLLIN | EPOLLOUT | EPOLLRDHUP | EPOLLET;
-    if (epoll_ctl(event->epoll_fd, EPOLL_CTL_ADD, conn->fd, &event->ev) == -1) {
+    event->ev_.data.ptr = conn;
+    event->ev_.events = EPOLLIN | EPOLLOUT | EPOLLRDHUP | EPOLLET;
+    if (epoll_ctl(event->fd_, EPOLL_CTL_ADD, conn->fd, &event->ev_) == -1) {
         perror("epoll_ctl client");
         return -1;
     }
@@ -279,7 +277,6 @@ Listener *tcpListen(char *port) {
         }
 
         memcpy(&listener->addr, p->ai_addr, p->ai_addrlen);
-        listener->addr_len = p->ai_addrlen;
 
         break;
     }
@@ -305,7 +302,7 @@ Listener *tcpListen(char *port) {
         goto clean;
     }
 
-    listener->pool = poolInit(sizeof(Conn), INITIAL_POOL_SIZE);
+    listener->pool_ = poolInit(sizeof(Conn), INITIAL_POOL_SIZE);
 
     return listener;
 
@@ -317,8 +314,7 @@ clean:
 
 Event *tcpPoll(Listener *listener) {
     Event *event = getEventPtr_(listener);
-    event->nfds =
-        epoll_wait(event->epoll_fd, event->events, MAX_EPOLL_EVENTS, -1);
+    event->nfds = epoll_wait(event->fd_, event->events, MAX_EPOLL_EVENTS, -1);
     if (event->nfds == -1) {
         perror("epoll_wait");
         tcpCloseListener(listener);
@@ -345,19 +341,16 @@ Conn *tcpAccept(Listener *listener) {
         return NULL;
     }
 
-    Event *event = getEventPtr_(listener);
-    Conn *conn = poolAlloc(listener->pool);
-    conn->pool = listener->pool;
+    Conn *conn = poolAlloc(listener->pool_);
+    conn->listener_ = listener;
     conn->fd = conn_fd;
-    conn->epoll_fd = event->epoll_fd;
     conn->addr = addr;
-    conn->addr_len = size;
 
     if (setNonBlockingSocket_(conn_fd) == -1) {
         goto clean;
     }
 
-    if (addtoEpollList_(conn, listener) == -1) {
+    if (addtoEpollList_(listener, conn) == -1) {
         goto clean;
     }
 
@@ -365,7 +358,7 @@ Conn *tcpAccept(Listener *listener) {
 
 clean:
     close(conn_fd);
-    poolFree(listener->pool, conn);
+    poolFree(listener->pool_, conn);
     return NULL;
 }
 
@@ -383,11 +376,12 @@ void tcpCloseConn(Conn *conn) {
         return;
     }
 
-    if (epoll_ctl(conn->epoll_fd, EPOLL_CTL_DEL, conn->fd, NULL) == -1) {
+    Event *event = getEventPtr_(conn->listener_);
+    if (epoll_ctl(event->fd_, EPOLL_CTL_DEL, conn->fd, NULL) == -1) {
         perror("epoll_ctl del");
     }
     close(conn->fd);
-    poolFree(conn->pool, conn);
+    poolFree(conn->listener_->pool_, conn);
 }
 
 void tcpCloseListener(Listener *listener) {
@@ -396,9 +390,9 @@ void tcpCloseListener(Listener *listener) {
     }
 
     Event *event = getEventPtr_(listener);
-    close(event->epoll_fd);
+    close(event->fd_);
     close(listener->fd);
-    poolDestroy(listener->pool);
+    poolDestroy(listener->pool_);
     free_(listener);
 }
 
@@ -431,7 +425,8 @@ ssize_t tcpSend(int fd, const void *buf, size_t len) {
     ssize_t bytes_send = 0;
 
     while (total < len) {
-        bytes_send = send(fd, (const char *)buf + total, bytes_left, 0);
+        bytes_send =
+            send(fd, (const char *)buf + total, bytes_left, MSG_NOSIGNAL);
         if (bytes_send == -1) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 return -2;
